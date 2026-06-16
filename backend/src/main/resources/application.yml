@@ -1,0 +1,62 @@
+server:
+  port: 8080
+
+spring:
+  application:
+    name: rag-qa-system
+
+  datasource:
+    url: jdbc:h2:file:./data/rag_qa;DB_CLOSE_DELAY=-1;MODE=MySQL
+    username: sa
+    password:
+    driver-class-name: org.h2.Driver
+
+  h2:
+    console:
+      enabled: true
+      path: /h2-console
+
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: true
+
+  servlet:
+    multipart:
+      max-file-size: 50MB
+      max-request-size: 50MB
+
+# 文件存储路径
+app:
+  upload-dir: ./uploads
+  chunk-size: 500
+  chunk-overlap: 50
+  top-k: 3
+
+# Embedding 配置（支持 simple / zhipu / deepseek）
+embedding:
+  provider: simple
+  api-key: ${EMBEDDING_API_KEY:}
+  model: text-embedding-3-small
+
+# LLM API 配置
+llm:
+  deepseek:
+    api-key: sk-304322845a3c4b2e947b8503c4cf9d36
+    model: deepseek-chat
+    url: https://api.deepseek.com/chat/completions
+  kimi:
+    api-key: sk-kimi-GM0ZGIyC6dNoiFrc65D9ZbP3b1CmCbsP0g7egROFPNPyl61Nuwh5PMvNedNVFnUb
+    model: moonshot-v1-8k
+    url: https://api.moonshot.cn/v1/chat/completions
+  temperature: 0.3
+  max-tokens: 2048
+
+# Chroma 向量数据库（simple 模式下使用本地内存存储）
+chroma:
+  host: http://localhost
+  port: 8000
+  collection-name: rag_docs

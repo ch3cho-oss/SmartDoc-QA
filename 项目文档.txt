@@ -1,0 +1,195 @@
+## **基于 RAG 的智能文档问答系统 – 完整开发规划**
+
+### **一、系统概述**
+
+开发一个基于 RAG（检索增强生成）的智能文档问答 Web 应用。用户可以上传 PDF 或 TXT 文档，系统自动提取文本、分块、向量化并存储。用户以自然语言提问，系统检索相关段落，再调用大语言模型生成基于文档内容的答案，同时展示引用的原文片段。系统支持同一文档的多轮对话，允许用户新建对话，实现个人文档知识库的智能问答。
+
+### **二、功能需求（完全覆盖指导书要求）**
+
+| 模块 | 具体功能 | 说明 |
+|------|----------|------|
+| **用户管理** | 注册、登录 | 用户数据隔离，每个用户只能管理自己的文档和对话 |
+| **文档上传与解析** | 支持 .pdf / .txt 格式，前端显示上传进度 | 后端提取纯文本内容，记录文件名、大小、上传时间等元数据 |
+| **文本分块** | 按固定大小（如 500 字符）或有重叠（如 overlap=50）切块 | 保证上下文连贯性 |
+| **向量化** | 使用 Embedding 模型将每个文本块转为向量 | 可选 API（智谱、DeepSeek）或本地模型（Ollama + BGE） |
+| **向量存储与检索** | 存储向量及对应原文；用户提问时检索 Top‑K 最相似块（K 可配置，默认 3） | 推荐 Chroma / FAISS / Pgvector |
+| **LLM 生成答案** | 将检索到的文本块作为上下文，调用大语言模型生成答案 | 推荐 DeepSeek API，备选智谱 GLM‑4、月之暗面 |
+| **前端展示** | 聊天界面显示答案 + 引用的原文片段（需高亮显示） | 答案与引用分离展示，引用可折叠或特殊背景色 |
+| **对话历史管理** | 针对同一个文档支持多轮对话（上下文不跨文档）；用户可以新建多个对话 | 保存每次问答记录，支持查看历史对话 |
+
+### **三、技术选型（推荐方案，兼顾可行性）**
+
+- **后端框架**：Spring Boot 2.7+ / 3.x  
+- **关系数据库**：MySQL 8.0（存储用户、文档、对话、消息）  
+- **向量数据库**：**Chroma**（轻量级，通过 HTTP 调用）或 **Elasticsearch 8.x**（Java 原生客户端）  
+- **PDF 解析**：Apache PDFBox  
+- **Embedding 模型**：智谱 AI `embedding-2` 或 DeepSeek Embedding API  
+- **大语言模型**：DeepSeek Chat API（`deepseek-chat` 模型，中文强、价格低）  
+- **前端**：Vue 3 + Element Plus（或 React + Ant Design）  
+- **HTTP 客户端**：Spring 的 `RestTemplate` / `WebClient` 或 `OkHttp`  
+- **开发工具**：IntelliJ IDEA，Maven，Git（可选）
+
+> **纯 Java 替代方案**：使用 **Pgvector**（PostgreSQL 扩展）或 **Lucene** 的向量功能，避免引入 Python 服务，但配置略复杂。
+
+### **四、核心流程**
+
+#### **4.1 文档上传与处理流程**
+
+1. 用户选择文件 → 前端通过 `axios` + `onUploadProgress` 显示进度条 → 上传至后端。  
+2. 后端保存原始文件到磁盘（或 MinIO/OSS），记录文件元信息到 MySQL `document` 表（状态置为 `processing`）。  
+3. 根据扩展名调用相应解析器：  
+   - `.txt`：原生 Java 按行读取。  
+   - `.pdf`：使用 `PDFBox` 提取全文。  
+4. 将文本按规则切块（例如 **chunk_size = 500，overlap = 50**）。  
+5. 对每个文本块调用 Embedding API 得到向量（如 1536 维）。  
+6. 将（向量、文本块内容、文档ID、块索引）存入向量数据库。  
+7. 更新 MySQL 中该文档的状态为 `completed`，记录总块数。  
+
+#### **4.2 问答流程**
+
+1. 用户选择某个已处理完成的文档，输入问题。  
+2. 后端接收（问题，文档ID，对话ID）。  
+3. 调用相同的 Embedding API 将问题转为向量。  
+4. 在向量数据库中检索该文档下与问题最相似的 Top‑K 个文本块。  
+5. 构建 Prompt：  
+
+   ```
+   你是一个基于文档的问答助手。请根据以下【参考内容】回答用户的问题。  
+   如果参考内容中没有相关信息，请直接说“根据当前文档，无法回答该问题”。  
+
+   参考内容：  
+   {chunk1}  
+   {chunk2}  
+   {chunk3}  
+
+   用户问题：{question}  
+   请回答：
+   ```
+
+6. 调用 LLM API 获取答案。  
+7. 将答案、检索到的文本块（作为引用）保存到 MySQL `message` 表。  
+8. 返回 JSON 给前端：`{ "answer": "...", "references": ["chunk1", "chunk2"] }`。  
+9. 前端渲染答案，并将引用原文用 `<div class="reference">` 高亮展示。  
+
+#### **4.3 多轮对话管理**
+
+- 每次用户在新对话中提问时，只基于**当前问题**检索相关段落。  
+- 为了保持对话连贯性，可以将之前几轮的用户问题与助手回答也拼接到 Prompt 中（作为对话历史），但**检索仍然只针对当前问题**（避免历史干扰检索结果）。  
+- 用户可随时“新建对话”，系统重新生成一个 `conversation_id`，之前的对话自动保存，可切换查看。
+
+### **五、数据库设计（MySQL）**
+
+```sql
+-- 用户表
+CREATE TABLE `user` (
+  `id` bigint PRIMARY KEY AUTO_INCREMENT,
+  `username` varchar(64) UNIQUE NOT NULL,
+  `password` varchar(128) NOT NULL,
+  `create_time` datetime DEFAULT CURRENT_TIMESTAMP
+);
+
+-- 文档表
+CREATE TABLE `document` (
+  `id` bigint PRIMARY KEY AUTO_INCREMENT,
+  `user_id` bigint NOT NULL,
+  `file_name` varchar(255) NOT NULL,
+  `file_path` varchar(512) NOT NULL,
+  `total_chunks` int DEFAULT 0,
+  `status` enum('processing','completed','failed') DEFAULT 'processing',
+  `upload_time` datetime DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (`user_id`) REFERENCES `user`(`id`) ON DELETE CASCADE
+);
+
+-- 对话表（属于某个用户 + 某个文档）
+CREATE TABLE `conversation` (
+  `id` bigint PRIMARY KEY AUTO_INCREMENT,
+  `user_id` bigint NOT NULL,
+  `document_id` bigint NOT NULL,
+  `title` varchar(255) DEFAULT '新对话',
+  `create_time` datetime DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (`user_id`) REFERENCES `user`(`id`),
+  FOREIGN KEY (`document_id`) REFERENCES `document`(`id`)
+);
+
+-- 消息表（记录每次问答）
+CREATE TABLE `message` (
+  `id` bigint PRIMARY KEY AUTO_INCREMENT,
+  `conversation_id` bigint NOT NULL,
+  `role` enum('user','assistant') NOT NULL,
+  `content` text NOT NULL,
+  `references` json DEFAULT NULL,   -- 存储引用的文本块数组
+  `create_time` datetime DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (`conversation_id`) REFERENCES `conversation`(`id`) ON DELETE CASCADE
+);
+```
+
+### **六、关键技术难点与解决方案**
+
+| 难点 | 解决方案 |
+|------|----------|
+| **PDF 解析格式混乱** | 使用 `PDFTextStripper` 并设置 `setLineSeparator("\n")`，保留段落结构；对于表格可考虑提取文本后简单后处理。 |
+| **中文 Embedding 效果** | 使用智谱 `embedding-2`（专门优化中文）或 DeepSeek Embedding；避免使用 OpenAI `text-embedding-ada-002`（英文优化）。 |
+| **向量数据库集成** | **推荐 Chroma**：启动独立 Docker 容器 (`chromadb/chroma`)，Spring Boot 使用 `RestTemplate` 调用 `/add` 和 `/query` 接口。或者使用 **Elasticsearch 8.x** 的 `dense_vector` 字段和 `knn` 查询。 |
+| **长文档处理耗时** | 异步处理：上传后立即返回 `docId` 并提示“处理中”；后台线程完成向量化后修改文档状态。前端轮询或 WebSocket 获取处理结果。 |
+| **多轮对话上下文处理** | 每次检索只依赖当前问题。将最近 3 轮对话（用户+助手）拼接在 Prompt 的“参考内容”之后，仅作为对话记忆，不参与检索。 |
+| **API 调用延迟（Embedding + LLM）** | 前端显示加载动画；可考虑使用 SSE 或 WebSocket 流式传输 LLM 输出，提升体验。 |
+| **引用高亮** | 后端返回的引用块是完整原文。前端在答案中查找相似文本（或由 LLM 明确输出引用标记，如 `[1]`），然后高亮对应片段。简单做法：将引用块单独展示在答案下方，用户自行对照。 |
+| **API Key 安全** | 将 API Key 配置在 `application.yml` 或环境变量中，禁止硬编码；提交代码时确保 `.gitignore` 忽略配置文件。 |
+
+### **七、课程设计报告撰写指南**
+
+**严格遵循指导书附录格式，至少 8 页，不能只是源代码清单。**
+
+#### **报告结构建议**
+
+1. **实验题目**：基于 RAG 的智能文档问答系统  
+2. **实验目的**  
+   - 掌握 Spring Boot + 前端分离开发模式  
+   - 理解 RAG 原理及实现  
+   - 学会调用 AI 模型 API 构建智能应用  
+3. **总体设计**  
+   - 系统架构图（前端 – 后端 – MySQL – 向量库 – AI API）  
+   - 模块划分（用户模块、文档管理模块、RAG 问答模块、对话模块）  
+   - RAG 技术原理介绍（为什么需要 RAG，如何减少幻觉）  
+4. **详细设计**  
+   - 数据库表结构及关系说明  
+   - 核心流程图：文档处理流程图、问答流程图  
+   - 关键代码片段（**只放最重要的**，且附解释）：  
+     - 文本分块算法  
+     - 调用 Embedding API 的代码  
+     - 向量检索与 Prompt 构造  
+     - 调用 LLM API 的代码  
+   - 前端引用高亮实现思路  
+5. **实验结果与分析**  
+   - 功能截图（注册/登录、文档上传、问答对话、引用高亮、历史对话）  
+   - 测试用例及分析：  
+     - 文档内具体问题（验证答案正确性）  
+     - 文档内跨段落问题（验证检索召回）  
+     - 文档外问题（验证模型拒绝回答）  
+     - 多轮对话（验证上下文连贯）  
+   - 系统性能分析（文档处理速度、问答响应时间）  
+   - 存在不足（如无法理解图片/表格、大文档首次处理慢）  
+6. **小结与心得体会**  
+   - 开发中遇到的问题（PDF 乱码、向量检索不准确、API 限流）及解决方法  
+   - 对 RAG、大模型应用的理解  
+   - 团队协作与时间管理经验  
+
+#### **注意事项**
+
+- 每张截图下方必须有文字说明实现了什么功能。  
+- 代码必须精简，禁止复制粘贴整个类。  
+- 流程图可用 Draw.io 绘制后插入。  
+- 报告中必须强调“引用原文片段并高亮”这一亮点。  
+- 若使用了任何第三方 API，需说明免费额度及申请方式。
+
+### **八、可扩展/加分项（超出基本要求）**
+
+- 支持更多文档格式（DOCX、MD）  
+- 支持扫描版 PDF（集成 OCR）  
+- 支持多文档联合问答（从用户所有文档中检索）  
+- 支持导出对话为 PDF/TXT  
+- 增加统计看板（文档数量、提问次数等）  
+
+---
+
+**这份规划可直接作为你开发与撰写报告的最终依据。** 如果需要具体某部分的代码示例（如 Spring Boot 调用 Chroma 或 DeepSeek API），我可以继续提供。
